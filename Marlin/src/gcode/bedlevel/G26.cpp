@@ -1,6 +1,6 @@
 /**
  * Marlin 3D Printer Firmware
- * Copyright (c) 2019 MarlinFirmware [https://github.com/MarlinFirmware/Marlin]
+ * Copyright (c) 2020 MarlinFirmware [https://github.com/MarlinFirmware/Marlin]
  *
  * Based on Sprinter and grbl.
  * Copyright (c) 2011 Camiel Gubbels / Erik van der Zalm
@@ -34,7 +34,7 @@
 #include "../../gcode/gcode.h"
 #include "../../feature/bedlevel/bedlevel.h"
 
-#include "../../Marlin.h"
+#include "../../MarlinCore.h"
 #include "../../module/planner.h"
 #include "../../module/stepper.h"
 #include "../../module/motion.h"
@@ -43,12 +43,15 @@
 #include "../../lcd/ultralcd.h"
 
 #define EXTRUSION_MULTIPLIER 1.0
-#define RETRACTION_MULTIPLIER 1.0
 #define PRIME_LENGTH 10.0
 #define OOZE_AMOUNT 0.3
 
 #define INTERSECTION_CIRCLE_RADIUS 5
 #define CROSSHAIRS_SIZE 3
+
+#ifndef G26_RETRACT_MULTIPLIER
+  #define G26_RETRACT_MULTIPLIER 1.0 // x 1mm
+#endif
 
 #ifndef G26_XY_FEEDRATE
   #define G26_XY_FEEDRATE (PLANNER_XY_FEEDRATE() / 3.0)
@@ -168,7 +171,7 @@ int8_t g26_prime_flag;
    */
   bool user_canceled() {
     if (!ui.button_pressed()) return false; // Return if the button isn't pressed
-    ui.set_status_P(PSTR(MSG_G26_CANCELED), 99);
+    ui.set_status_P(GET_TEXT(MSG_G26_CANCELED), 99);
     #if HAS_LCD_MENU
       ui.quick_feedback();
     #endif
@@ -370,7 +373,7 @@ inline bool turn_on_heaters() {
 
     if (g26_bed_temp > 25) {
       #if HAS_SPI_LCD
-        ui.set_status_P(PSTR(MSG_G26_HEATING_BED), 99);
+        ui.set_status_P(GET_TEXT(MSG_G26_HEATING_BED), 99);
         ui.quick_feedback();
         #if HAS_LCD_MENU
           ui.capture();
@@ -391,7 +394,7 @@ inline bool turn_on_heaters() {
 
   // Start heating the active nozzle
   #if HAS_SPI_LCD
-    ui.set_status_P(PSTR(MSG_G26_HEATING_NOZZLE), 99);
+    ui.set_status_P(GET_TEXT(MSG_G26_HEATING_NOZZLE), 99);
     ui.quick_feedback();
   #endif
   thermalManager.setTargetHotend(g26_hotend_temp, active_extruder);
@@ -418,15 +421,14 @@ inline bool turn_on_heaters() {
 inline bool prime_nozzle() {
 
   const feedRate_t fr_slow_e = planner.settings.max_feedrate_mm_s[E_AXIS] / 15.0f;
-  #if HAS_LCD_MENU
+  #if HAS_LCD_MENU && DISABLED(TOUCH_BUTTONS) // ui.button_pressed issue with touchscreen
     #if ENABLED(PREVENT_LENGTHY_EXTRUDE)
       float Total_Prime = 0.0;
     #endif
 
     if (g26_prime_flag == -1) {  // The user wants to control how much filament gets purged
-
       ui.capture();
-      ui.set_status_P(PSTR(MSG_G26_MANUAL_PRIME), 99);
+      ui.set_status_P(GET_TEXT(MSG_G26_MANUAL_PRIME), 99);
       ui.chirp();
 
       destination = current_position;
@@ -438,7 +440,10 @@ inline bool prime_nozzle() {
         destination.e += 0.25;
         #if ENABLED(PREVENT_LENGTHY_EXTRUDE)
           Total_Prime += 0.25;
-          if (Total_Prime >= EXTRUDE_MAXLENGTH) return G26_ERR;
+          if (Total_Prime >= EXTRUDE_MAXLENGTH) {
+            ui.release();
+            return G26_ERR;
+          }
         #endif
         prepare_internal_move_to_destination(fr_slow_e);
         destination = current_position;
@@ -450,7 +455,7 @@ inline bool prime_nozzle() {
 
       ui.wait_for_release();
 
-      ui.set_status_P(PSTR(MSG_G26_PRIME_DONE), 99);
+      ui.set_status_P(GET_TEXT(MSG_G26_PRIME_DONE), 99);
       ui.quick_feedback();
       ui.release();
     }
@@ -458,7 +463,7 @@ inline bool prime_nozzle() {
   #endif
   {
     #if HAS_SPI_LCD
-      ui.set_status_P(PSTR(MSG_G26_FIXED_LENGTH), 99);
+      ui.set_status_P(GET_TEXT(MSG_G26_FIXED_LENGTH), 99);
       ui.quick_feedback();
     #endif
     destination = current_position;
@@ -507,7 +512,7 @@ void GcodeSuite::G26() {
   if (parser.seenval('T')) tool_change(parser.value_int());
 
   g26_extrusion_multiplier    = EXTRUSION_MULTIPLIER;
-  g26_retraction_multiplier   = RETRACTION_MULTIPLIER;
+  g26_retraction_multiplier   = G26_RETRACT_MULTIPLIER;
   g26_layer_height            = MESH_TEST_LAYER_HEIGHT;
   g26_prime_length            = PRIME_LENGTH;
   g26_bed_temp                = MESH_TEST_BED_TEMP;
@@ -705,7 +710,7 @@ void GcodeSuite::G26() {
     if (location.valid()) {
       const xy_pos_t circle = _GET_MESH_POS(location.pos);
 
-      // If this mesh location is outside the printable_radius, skip it.
+      // If this mesh location is outside the printable radius, skip it.
       if (!position_is_reachable(circle)) continue;
 
       // Determine where to start and end the circle,
@@ -800,8 +805,8 @@ void GcodeSuite::G26() {
             if (user_canceled()) goto LEAVE;          // Check if the user wants to stop the Mesh Validation
           #endif
 
-          xy_float_t p = { circle.x + _COS(ind    ), circle.y + _SIN(ind    ), g26_layer_height },
-                     q = { circle.x + _COS(ind + 1), circle.y + _SIN(ind + 1), g26_layer_height };
+          xyz_float_t p = { circle.x + _COS(ind    ), circle.y + _SIN(ind    ), g26_layer_height },
+                      q = { circle.x + _COS(ind + 1), circle.y + _SIN(ind + 1), g26_layer_height };
 
           #if IS_KINEMATIC
             // Check to make sure this segment is entirely on the bed, skip if not.
@@ -827,7 +832,7 @@ void GcodeSuite::G26() {
   } while (--g26_repeats && location.valid());
 
   LEAVE:
-  ui.set_status_P(PSTR(MSG_G26_LEAVING), -1);
+  ui.set_status_P(GET_TEXT(MSG_G26_LEAVING), -1);
 
   retract_filament(destination);
   destination.z = Z_CLEARANCE_BETWEEN_PROBES;

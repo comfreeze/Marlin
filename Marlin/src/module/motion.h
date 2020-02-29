@@ -1,6 +1,6 @@
 /**
  * Marlin 3D Printer Firmware
- * Copyright (c) 2019 MarlinFirmware [https://github.com/MarlinFirmware/Marlin]
+ * Copyright (c) 2020 MarlinFirmware [https://github.com/MarlinFirmware/Marlin]
  *
  * Based on Sprinter and grbl.
  * Copyright (c) 2011 Camiel Gubbels / Erik van der Zalm
@@ -41,6 +41,7 @@
 // Axis homed and known-position states
 extern uint8_t axis_homed, axis_known_position;
 constexpr uint8_t xyz_bits = _BV(X_AXIS) | _BV(Y_AXIS) | _BV(Z_AXIS);
+FORCE_INLINE bool no_axes_homed() { return !axis_homed; }
 FORCE_INLINE bool all_axes_homed() { return (axis_homed & xyz_bits) == xyz_bits; }
 FORCE_INLINE bool all_axes_known() { return (axis_known_position & xyz_bits) == xyz_bits; }
 FORCE_INLINE void set_all_unhomed() { axis_homed = 0; }
@@ -63,6 +64,12 @@ extern bool relative_mode;
 
 extern xyze_pos_t current_position,  // High-level current tool position
                   destination;       // Destination for a move
+
+// G60/G61 Position Save and Return
+#if SAVED_POSITIONS
+  extern uint8_t saved_slots[(SAVED_POSITIONS + 7) >> 3];
+  extern xyz_pos_t stored_position[SAVED_POSITIONS];
+#endif
 
 // Scratch space for a cartesian result
 extern xyz_pos_t cartes;
@@ -107,13 +114,16 @@ extern int16_t feedrate_percentage;
   constexpr uint8_t active_extruder = 0;
 #endif
 
+#if ENABLED(LCD_SHOW_E_TOTAL)
+  extern float e_move_accumulator;
+#endif
+
 FORCE_INLINE float pgm_read_any(const float *p) { return pgm_read_float(p); }
 FORCE_INLINE signed char pgm_read_any(const signed char *p) { return pgm_read_byte(p); }
 
 #define XYZ_DEFS(T, NAME, OPT) \
   extern const XYZval<T> NAME##_P; \
-  FORCE_INLINE T NAME(AxisEnum axis) { return pgm_read_any(&NAME##_P[axis]); } \
-  typedef void __void_##OPT##__
+  FORCE_INLINE T NAME(AxisEnum axis) { return pgm_read_any(&NAME##_P[axis]); }
 
 XYZ_DEFS(float, base_min_pos,   MIN_POS);
 XYZ_DEFS(float, base_max_pos,   MAX_POS);
@@ -200,23 +210,22 @@ inline void prepare_internal_move_to_destination(const feedRate_t &fr_mm_s=0.0f)
  * Blocking movement and shorthand functions
  */
 void do_blocking_move_to(const float rx, const float ry, const float rz, const feedRate_t &fr_mm_s=0.0f);
+void do_blocking_move_to(const xy_pos_t &raw, const feedRate_t &fr_mm_s=0.0f);
+void do_blocking_move_to(const xyz_pos_t &raw, const feedRate_t &fr_mm_s=0.0f);
+void do_blocking_move_to(const xyze_pos_t &raw, const feedRate_t &fr_mm_s=0.0f);
+
 void do_blocking_move_to_x(const float &rx, const feedRate_t &fr_mm_s=0.0f);
 void do_blocking_move_to_y(const float &ry, const feedRate_t &fr_mm_s=0.0f);
 void do_blocking_move_to_z(const float &rz, const feedRate_t &fr_mm_s=0.0f);
-void do_blocking_move_to_xy(const float &rx, const float &ry, const feedRate_t &fr_mm_s=0.0f);
 
-FORCE_INLINE void do_blocking_move_to(const xy_pos_t &raw, const feedRate_t &fr_mm_s=0.0f) {
-  do_blocking_move_to(raw.x, raw.y, current_position.z, fr_mm_s);
-}
-FORCE_INLINE void do_blocking_move_to(const xyz_pos_t &raw, const feedRate_t &fr_mm_s=0.0f) {
-  do_blocking_move_to(raw.x, raw.y, raw.z, fr_mm_s);
-}
-FORCE_INLINE void do_blocking_move_to(const xyze_pos_t &raw, const feedRate_t &fr_mm_s=0.0f) {
-  do_blocking_move_to(raw.x, raw.y, raw.z, fr_mm_s);
-}
-FORCE_INLINE void do_blocking_move_to_xy(const xy_pos_t &raw, const feedRate_t &fr_mm_s=0.0f) {
-  do_blocking_move_to_xy(raw.x, raw.y, fr_mm_s);
-}
+void do_blocking_move_to_xy(const float &rx, const float &ry, const feedRate_t &fr_mm_s=0.0f);
+void do_blocking_move_to_xy(const xy_pos_t &raw, const feedRate_t &fr_mm_s=0.0f);
+FORCE_INLINE void do_blocking_move_to_xy(const xyz_pos_t &raw, const feedRate_t &fr_mm_s=0.0f)  { do_blocking_move_to_xy(xy_pos_t(raw), fr_mm_s); }
+FORCE_INLINE void do_blocking_move_to_xy(const xyze_pos_t &raw, const feedRate_t &fr_mm_s=0.0f) { do_blocking_move_to_xy(xy_pos_t(raw), fr_mm_s); }
+
+void do_blocking_move_to_xy_z(const xy_pos_t &raw, const float &z, const feedRate_t &fr_mm_s=0.0f);
+FORCE_INLINE void do_blocking_move_to_xy_z(const xyz_pos_t &raw, const float &z, const feedRate_t &fr_mm_s=0.0f)  { do_blocking_move_to_xy_z(xy_pos_t(raw), z, fr_mm_s); }
+FORCE_INLINE void do_blocking_move_to_xy_z(const xyze_pos_t &raw, const float &z, const feedRate_t &fr_mm_s=0.0f) { do_blocking_move_to_xy_z(xy_pos_t(raw), z, fr_mm_s); }
 
 void remember_feedrate_and_scaling();
 void remember_feedrate_scaling_off();
@@ -270,12 +279,12 @@ void homeaxis(const AxisEnum axis);
 #else
   #define NATIVE_TO_LOGICAL(POS, AXIS) (POS)
   #define LOGICAL_TO_NATIVE(POS, AXIS) (POS)
-  FORCE_INLINE void toLogical(xy_pos_t &raw)   { UNUSED(raw); }
-  FORCE_INLINE void toLogical(xyz_pos_t &raw)  { UNUSED(raw); }
-  FORCE_INLINE void toLogical(xyze_pos_t &raw) { UNUSED(raw); }
-  FORCE_INLINE void toNative(xy_pos_t &raw)    { UNUSED(raw); }
-  FORCE_INLINE void toNative(xyz_pos_t &raw)   { UNUSED(raw); }
-  FORCE_INLINE void toNative(xyze_pos_t &raw)  { UNUSED(raw); }
+  FORCE_INLINE void toLogical(xy_pos_t&)   {}
+  FORCE_INLINE void toLogical(xyz_pos_t&)  {}
+  FORCE_INLINE void toLogical(xyze_pos_t&) {}
+  FORCE_INLINE void toNative(xy_pos_t&)    {}
+  FORCE_INLINE void toNative(xyz_pos_t&)   {}
+  FORCE_INLINE void toNative(xyze_pos_t&)  {}
 #endif
 #define LOGICAL_X_POSITION(POS) NATIVE_TO_LOGICAL(POS, X_AXIS)
 #define LOGICAL_Y_POSITION(POS) NATIVE_TO_LOGICAL(POS, Y_AXIS)
@@ -289,6 +298,7 @@ void homeaxis(const AxisEnum axis);
  */
 
 #if IS_KINEMATIC // (DELTA or SCARA)
+
   #if HAS_SCARA_OFFSET
     extern abc_pos_t scara_home_offset; // A and B angular offsets, Z mm offset
   #endif
@@ -296,7 +306,7 @@ void homeaxis(const AxisEnum axis);
   // Return true if the given point is within the printable area
   inline bool position_is_reachable(const float &rx, const float &ry, const float inset=0) {
     #if ENABLED(DELTA)
-      return HYPOT2(rx, ry) <= sq(DELTA_PRINTABLE_RADIUS - inset);
+      return HYPOT2(rx, ry) <= sq(DELTA_PRINTABLE_RADIUS - inset + slop);
     #elif IS_SCARA
       const float R2 = HYPOT2(rx - SCARA_OFFSET_X, ry - SCARA_OFFSET_Y);
       return (
@@ -313,13 +323,25 @@ void homeaxis(const AxisEnum axis);
   }
 
   #if HAS_BED_PROBE
-    // Return true if the both nozzle and the probe can reach the given point.
-    // Note: This won't work on SCARA since the probe offset rotates with the arm.
-    inline bool position_is_reachable_by_probe(const float &rx, const float &ry) {
-      return position_is_reachable(rx - probe_offset.x, ry - probe_offset.y)
-             && position_is_reachable(rx, ry, ABS(MIN_PROBE_EDGE));
-    }
-  #endif
+
+    #if HAS_PROBE_XY_OFFSET
+
+      // Return true if the both nozzle and the probe can reach the given point.
+      // Note: This won't work on SCARA since the probe offset rotates with the arm.
+      inline bool position_is_reachable_by_probe(const float &rx, const float &ry) {
+        return position_is_reachable(rx - probe.offset_xy.x, ry - probe.offset_xy.y)
+               && position_is_reachable(rx, ry, ABS(MIN_PROBE_EDGE));
+      }
+
+    #else
+
+      FORCE_INLINE bool position_is_reachable_by_probe(const float &rx, const float &ry) {
+        return position_is_reachable(rx, ry, MIN_PROBE_EDGE);
+      }
+
+    #endif
+
+  #endif // HAS_BED_PROBE
 
 #else // CARTESIAN
 
@@ -338,6 +360,7 @@ void homeaxis(const AxisEnum axis);
   inline bool position_is_reachable(const xy_pos_t &pos) { return position_is_reachable(pos.x, pos.y); }
 
   #if HAS_BED_PROBE
+
     /**
      * Return whether the given position is within the bed, and whether the nozzle
      * can reach the position required to put the probe at the given position.
@@ -346,18 +369,18 @@ void homeaxis(const AxisEnum axis);
      *          nozzle must be be able to reach +10,-10.
      */
     inline bool position_is_reachable_by_probe(const float &rx, const float &ry) {
-      return position_is_reachable(rx - probe_offset.x, ry - probe_offset.y)
-          && WITHIN(rx, probe_min_x() - slop, probe_max_x() + slop)
-          && WITHIN(ry, probe_min_y() - slop, probe_max_y() + slop);
+      return position_is_reachable(rx - probe.offset_xy.x, ry - probe.offset_xy.y)
+          && WITHIN(rx, probe.min_x() - slop, probe.max_x() + slop)
+          && WITHIN(ry, probe.min_y() - slop, probe.max_y() + slop);
     }
-  #endif
+
+  #endif // HAS_BED_PROBE
 
 #endif // CARTESIAN
 
 #if !HAS_BED_PROBE
   FORCE_INLINE bool position_is_reachable_by_probe(const float &rx, const float &ry) { return position_is_reachable(rx, ry); }
 #endif
-FORCE_INLINE bool position_is_reachable_by_probe(const xy_int_t &pos) { return position_is_reachable_by_probe(pos.x, pos.y); }
 FORCE_INLINE bool position_is_reachable_by_probe(const xy_pos_t &pos) { return position_is_reachable_by_probe(pos.x, pos.y); }
 
 /**
